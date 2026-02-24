@@ -1,9 +1,10 @@
 # Technical Requirements: Refined SAP HANA RAG System
 
-**Version:** 1.0
+**Version:** 2.0
 **Date:** 2026-02-24
-**Status:** Draft
+**Status:** Expanded Specification — Ready for Phase 0 Pilot
 **Author:** Claude Code via OpenClaw
+**Changelog:** v2.0 — Expanded with data profiling results, schema discovery, sensitivity analysis, ADRs, and finalized pilot scope. Cross-references new docs: `data-profiling-and-schema-discovery.md`, `sensitivity-scan-and-pii-report.md`, `pilot-selection-and-architecture-decisions.md`.
 
 ---
 
@@ -237,3 +238,112 @@ The following must be confirmed with Refined before finalizing the architecture:
 | 2     | Pilot: Sales + Email RAG deployment           | 4 weeks   |
 | 3     | Architecture review + tech stack finalization | 1 week    |
 | 4     | Full phased rollout across all domains        | 12 weeks  |
+
+---
+
+## 11. Finalized Tech Stack (v2.0 — Post ADR Review)
+
+> See full ADRs in `docs/pilot-selection-and-architecture-decisions.md`.
+
+```mermaid
+flowchart TB
+    subgraph Layer1["Layer 1: Extraction"]
+        E1["hdbcli — SAP HANA connector\n(read-only, TLS encrypted)"]
+        E2["Python email / MS Graph API\n(email archive connector)"]
+        E3["pdfplumber + pytesseract\n(document extraction)"]
+    end
+
+    subgraph Layer2["Layer 2: Processing"]
+        P1["Apache Airflow\n(DAG orchestration)"]
+        P2["Microsoft Presidio\n(PII detection + masking)"]
+        P3["LangChain TextSplitters\n(per-type chunking)"]
+        P4["multilingual-e5-large\n(local embedding model)"]
+    end
+
+    subgraph Layer3["Layer 3: Storage"]
+        S1["Qdrant\n(vector store, HNSW)\n~228 GB at full scale"]
+        S2["PostgreSQL 16\n(metadata, audit, lineage)"]
+        S3["MinIO\n(document store, S3-compat)"]
+        S4["Redis\n(query cache, TTL=5min)"]
+    end
+
+    subgraph Layer4["Layer 4: Serving"]
+        V1["FastAPI\n(RAG API :8000)"]
+        V2["cross-encoder re-ranker\n(top-5 result quality)"]
+        V3["MiniMax-M2.5\n(answer synthesis)"]
+    end
+
+    Layer1 --> Layer2 --> Layer3 --> Layer4
+```
+
+---
+
+## 12. Document Cross-References (v2.0)
+
+| Document | Purpose | Status |
+|----------|---------|--------|
+| `docs/data-profiling-and-schema-discovery.md` | SAP table inventory, row counts, extraction queries | Complete |
+| `docs/sensitivity-scan-and-pii-report.md` | PII field map, masking rules, GDPR compliance | Complete |
+| `docs/pilot-selection-and-architecture-decisions.md` | Pilot scope, ADRs, tech stack decisions | Complete |
+| `docs/data-to-rag-mapping.md` | Data type → RAG approach mapping | Complete (v1.1) |
+| `docs/solution-architecture.md` | End-to-end system architecture | Complete (v1.0) |
+| `docs/architecture-diagrams.md` | All Mermaid diagrams | Complete (v1.0) |
+
+---
+
+## 13. Email Volume Assessment (v2.0)
+
+Based on schema discovery analysis:
+
+| Scenario | Volume Estimate | Source |
+|----------|----------------|--------|
+| If emails in SOFFPHIO (SAP-native) | ~50 GB / ~2–4M messages | SOFFCONT BLOB analysis |
+| If emails in Exchange/O365 | ~100 GB+ (shared mailboxes) | Microsoft admin report needed |
+| Email as % of total HANA data | ~12–24% | 50–100 GB of 420 GB |
+| Email pilot subset (2024) | ~2 GB / ~50K messages | Date-filtered extraction |
+
+> **Confirmed open question:** Run SOFFPHIO profiling query (Section 9.3 of data-profiling doc) to get exact email count. Until confirmed, pilot budget for email connector handles both paths.
+
+---
+
+## 14. Specific High-Priority Use Cases (v2.0)
+
+Based on standard SAP enterprise deployments, these use cases have the highest ROI:
+
+### Use Case 1: Sales Intelligence (Pilot 1)
+- **Who:** Sales managers, account managers
+- **Query examples:** "What's Acme Corp's order history?", "Find all delayed deliveries from Q3"
+- **Business value:** Reduce time from 30min manual SAP navigation to 10-second AI query
+- **RAG approach:** Hybrid (sales_vectors + SQL-RAG for aggregations)
+
+### Use Case 2: Email Search & Discovery (Pilot 2)
+- **Who:** All business users, Legal/compliance team
+- **Query examples:** "Find all emails about the merger project", "What did we tell suppliers about the price change?"
+- **Business value:** Legal discovery time reduction; institutional knowledge preservation
+- **RAG approach:** Vector-only (email_vectors)
+
+### Use Case 3: Financial Reporting Assistance (Phase 1)
+- **Who:** Finance controllers, CFO office
+- **Query examples:** "What's our cost center spend vs budget?", "Find all accruals from December"
+- **Business value:** Month-end close acceleration; ad-hoc query without SAP GUI skills
+- **RAG approach:** Hybrid (finance_vectors + SQL-RAG on BW)
+
+### Use Case 4: Procurement Intelligence (Phase 1)
+- **Who:** Procurement team, supply chain managers
+- **Query examples:** "Which vendors have the most late deliveries?", "Find POs for steel above market rate"
+- **Business value:** Spend analytics, vendor performance monitoring
+- **RAG approach:** Hybrid (supply_chain_vectors)
+
+---
+
+## 15. Real-time vs Batch Decision (v2.0)
+
+| Requirement | Real-time CDC | Nightly Batch | Decision |
+|------------|--------------|---------------|---------|
+| **Pilot (Phase 0)** | Not needed | ✅ Sufficient | **Nightly batch** |
+| **Phase 1 (Finance/Sales)** | Optional | ✅ Primary | **Nightly batch + manual trigger** |
+| **Phase 2+ (Production)** | Desirable for finance | ✅ Default | **Nightly default; CDC for GL if needed** |
+
+**Rationale:** Nightly batch at 02:00 provides fresh-enough data for most RAG use cases. Finance GL in particular changes throughout the day, but users querying the RAG system are generally looking at historical patterns, not live balances (live balances come from SAP directly). CDC adds significant architectural complexity and should be validated as a business requirement before implementation.
+
+**CDC mechanism if needed:** SAP HANA provides `SYS.AUDIT_LOG` and application-level change document tables (`CDHDR`/`CDPOS`) for detecting changes to key business documents.
